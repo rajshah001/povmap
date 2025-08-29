@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Map, { MapRef, NavigationControl } from "react-map-gl/maplibre";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -62,7 +62,11 @@ export default function MapView() {
 
     const origin = map.project([arrow.longitude, arrow.latitude]);
     const angle = (arrow.bearingDeg * Math.PI) / 180;
-    const lengthPx = Math.min(width, height) * 0.25;
+
+    // Convert requested meters to pixels at current zoom/latitude
+    const zoom = map.getZoom();
+    const metersPerPixel = 156543.03392 * Math.cos((arrow.latitude * Math.PI) / 180) / Math.pow(2, zoom);
+    const lengthPx = Math.min(Math.max(arrow.lengthMeters / Math.max(metersPerPixel, 1e-6), 5), Math.max(width, height));
 
     const endX = origin.x + Math.sin(angle) * lengthPx;
     const endY = origin.y - Math.cos(angle) * lengthPx;
@@ -94,6 +98,19 @@ export default function MapView() {
     ctx.restore();
   }, [arrow]);
 
+  const redrawOverlay = useCallback(() => {
+    const canvas = canvasRef.current;
+    const map = mapRef.current?.getMap();
+    if (!canvas || !map) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const { width, height } = map.getCanvas();
+    canvas.width = width;
+    canvas.height = height;
+    ctx.clearRect(0, 0, width, height);
+    drawOverlay(ctx, width, height);
+  }, [drawOverlay]);
+
   const exportMapSnapshot = useCallback(async (): Promise<string | undefined> => {
     const map = mapRef.current?.getMap();
     if (!map) return undefined;
@@ -107,6 +124,56 @@ export default function MapView() {
     drawOverlay(ctx, offscreen.width, offscreen.height);
     return offscreen.toDataURL("image/jpeg", 0.8);
   }, [drawOverlay]);
+
+  // Redraw when arrow changes so feedback appears even without map motion
+  useEffect(() => {
+    redrawOverlay();
+  }, [arrow, redrawOverlay]);
+
+  // Drag-to-draw like draw.io using the overlay canvas when in Draw mode
+  const drawingRef = useRef(false);
+  const startRef = useRef<{ x: number; y: number; lng: number; lat: number } | null>(null);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (mode !== "draw") return;
+    const map = mapRef.current?.getMap();
+    const canvas = canvasRef.current;
+    if (!map || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const ll = map.unproject([x, y]);
+    drawingRef.current = true;
+    startRef.current = { x, y, lng: ll.lng, lat: ll.lat };
+    setArrow({ latitude: ll.lat, longitude: ll.lng, bearingDeg: bearingDeg, lengthMeters: lengthMeters });
+  }, [bearingDeg, lengthMeters, mode]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!drawingRef.current || mode !== "draw") return;
+    const map = mapRef.current?.getMap();
+    const canvas = canvasRef.current;
+    const start = startRef.current;
+    if (!map || !canvas || !start) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const dx = x - start.x;
+    const dy = y - start.y;
+    const angleRad = Math.atan2(dx, -dy);
+    const bearing = ((angleRad * 180) / Math.PI + 360) % 360;
+    const endLL = map.unproject([x, y]);
+    const startLL = new maplibregl.LngLat(start.lng, start.lat);
+    const endLngLat = new maplibregl.LngLat(endLL.lng, endLL.lat);
+    const meters = startLL.distanceTo(endLngLat);
+    setBearingDeg(Math.round(bearing));
+    setLengthMeters(Math.min(Math.max(Math.round(meters), 50), 2000));
+    setArrow({ latitude: start.lat, longitude: start.lng, bearingDeg: bearing, lengthMeters: meters });
+    redrawOverlay();
+  }, [mode, redrawOverlay]);
+
+  const handlePointerUp = useCallback(() => {
+    drawingRef.current = false;
+  }, []);
 
   const generate = useCallback(async () => {
     if (!arrow) return;
@@ -176,7 +243,15 @@ export default function MapView() {
         >
           <NavigationControl position="top-left" />
         </Map>
-        <canvas ref={canvasRef} className="pointer-events-none absolute inset-0" />
+        <canvas
+          ref={canvasRef}
+          className={`absolute inset-0 ${mode === "draw" ? "cursor-crosshair" : "pointer-events-none"}`}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerUp}
+          style={{ pointerEvents: mode === "draw" ? "auto" : "none" }}
+        />
         <div className="absolute top-3 left-3 bg-white/90 backdrop-blur border rounded-full flex items-center overflow-hidden">
           <button onClick={() => setMode("pan")} className={`px-3 py-1.5 text-xs ${mode === "pan" ? "bg-gray-900 text-white" : "text-gray-700"}`}>Pan</button>
           <button onClick={() => setMode("draw")} className={`px-3 py-1.5 text-xs ${mode === "draw" ? "bg-gray-900 text-white" : "text-gray-700"}`}>Draw arrow</button>
@@ -212,7 +287,7 @@ export default function MapView() {
         </div>
 
         <div className="flex gap-2">
-          <button onClick={clearArrow} className="rounded border px-3 py-2 text-sm">Clear arrow</button>
+          <button onClick={clearArrow} disabled={!arrow} className="rounded border px-3 py-2 text-sm disabled:opacity-50">Clear arrow</button>
           <button disabled={!arrow || isGenerating} onClick={generate} className="rounded bg-green-600 text-white px-3 py-2 text-sm disabled:opacity-50">
             {isGenerating ? "Generating…" : "Generate View"}
           </button>
