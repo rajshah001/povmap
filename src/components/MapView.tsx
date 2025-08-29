@@ -24,18 +24,20 @@ export default function MapView() {
   const [arrow, setArrow] = useState<ArrowSelection | undefined>(undefined);
   const [bearingDeg, setBearingDeg] = useState<number>(0);
   const [lengthMeters, setLengthMeters] = useState<number>(150);
+  const [mode, setMode] = useState<"pan" | "draw">("draw");
   const { items, add, remove } = useHistory();
 
   const styleUrl = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json";
 
   const onMapClick = useCallback((e: { lngLat: { lng: number; lat: number } }) => {
+    if (mode !== "draw") return;
     setArrow({
       latitude: e.lngLat.lat,
       longitude: e.lngLat.lng,
       bearingDeg: bearingDeg,
       lengthMeters: lengthMeters,
     });
-  }, [bearingDeg, lengthMeters]);
+  }, [bearingDeg, lengthMeters, mode]);
 
   const snapshotMapState = useCallback((): MapStateSnapshot | undefined => {
     const map = mapRef.current?.getMap();
@@ -67,8 +69,8 @@ export default function MapView() {
 
     ctx.save();
     ctx.lineWidth = 4;
-    ctx.strokeStyle = "#16a34a";
-    ctx.fillStyle = "#16a34a";
+    ctx.strokeStyle = "#ef4444";
+    ctx.fillStyle = "#ef4444";
     ctx.lineCap = "round";
 
     ctx.beginPath();
@@ -112,7 +114,13 @@ export default function MapView() {
     try {
       const mapState = snapshotMapState();
       if (!mapState) return;
-      const payload: GeneratePayload = { prompt: prompt.trim() || undefined, arrow, map: mapState };
+      const mapSnapshotDataUrl = (await exportMapSnapshot()) ?? "";
+      const payload: GeneratePayload & { mapSnapshotDataUrl?: string } = {
+        prompt: prompt.trim() || undefined,
+        arrow,
+        map: mapState,
+        mapSnapshotDataUrl,
+      };
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -120,12 +128,11 @@ export default function MapView() {
       });
       if (!res.ok) throw new Error("Generation failed");
       const data = await res.json();
-      const mapSnapshotDataUrl = (await exportMapSnapshot()) ?? "";
       const result: PovResult = {
         id: data.id ?? crypto.randomUUID(),
         createdAt: Date.now(),
         request: { prompt: payload.prompt || "", arrow: payload.arrow!, map: payload.map },
-        mapSnapshotDataUrl,
+        mapSnapshotDataUrl: payload.mapSnapshotDataUrl || "",
         imageDataUrl: data.imageDataUrl,
         model: data.model,
         safetyLabels: data.safetyLabels,
@@ -155,7 +162,7 @@ export default function MapView() {
   }, [drawOverlay]);
 
   return (
-    <div className="min-h-screen grid grid-cols-1 lg:grid-cols-[1fr_360px]">
+    <div className="min-h-screen grid grid-cols-1 lg:grid-cols-[1fr_380px]">
       <div className="relative">
         <Map
           ref={mapRef}
@@ -163,13 +170,18 @@ export default function MapView() {
           initialViewState={{ latitude: DEFAULT_CENTER.latitude, longitude: DEFAULT_CENTER.longitude, zoom: 12 }}
           style={{ width: "100%", height: "100vh" }}
           mapStyle={styleUrl}
+          dragPan={mode === "pan"}
           onClick={onMapClick}
           onRender={onRender}
         >
           <NavigationControl position="top-left" />
         </Map>
         <canvas ref={canvasRef} className="pointer-events-none absolute inset-0" />
-        <div className="absolute top-3 left-3 px-3 py-1.5 rounded-full text-xs bg-white/80 backdrop-blur border text-gray-700">Click map to set viewpoint</div>
+        <div className="absolute top-3 left-3 bg-white/90 backdrop-blur border rounded-full flex items-center overflow-hidden">
+          <button onClick={() => setMode("pan")} className={`px-3 py-1.5 text-xs ${mode === "pan" ? "bg-gray-900 text-white" : "text-gray-700"}`}>Pan</button>
+          <button onClick={() => setMode("draw")} className={`px-3 py-1.5 text-xs ${mode === "draw" ? "bg-gray-900 text-white" : "text-gray-700"}`}>Draw arrow</button>
+        </div>
+        <div className="absolute top-3 left-[160px] px-3 py-1.5 rounded-full text-xs bg-white/80 backdrop-blur border text-gray-700">{mode === "draw" ? "Click map to set viewpoint" : "Drag to pan map"}</div>
       </div>
 
       <aside className="border-l bg-white/90 backdrop-blur p-4 flex flex-col gap-4">
