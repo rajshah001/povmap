@@ -1,8 +1,8 @@
 import { NextRequest } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// NOTE: Model name may evolve; keep configurable via env with sensible default.
-const DEFAULT_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+// NOTE: Default to preview model id per Nano Banana docs; allow override via env
+const DEFAULT_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image-preview";
 
 export async function POST(req: NextRequest) {
   try {
@@ -35,7 +35,27 @@ export async function POST(req: NextRequest) {
       const model = client.getGenerativeModel({ model: DEFAULT_MODEL });
       const contextText = buildContextText(prompt, arrow, map);
       const imagePart = mapSnapshotDataUrl ? dataUrlToPart(mapSnapshotDataUrl) : undefined;
-      const res = await model.generateContent(imagePart ? [contextText, imagePart] : contextText);
+      const res = await model.generateContent(
+        imagePart
+          ? {
+              contents: [
+                {
+                  role: "user",
+                  parts: [{ text: contextText }, imagePart],
+                },
+              ],
+              generationConfig: { responseMimeType: "image/png" },
+            }
+          : {
+              contents: [
+                {
+                  role: "user",
+                  parts: [{ text: contextText }],
+                },
+              ],
+              generationConfig: { responseMimeType: "image/png" },
+            }
+      );
       const imgPart = res.response.candidates?.[0]?.content?.parts?.find(
         (p: { inlineData?: { mimeType?: string; data?: string } }) => p.inlineData?.mimeType?.startsWith("image/")
       );
