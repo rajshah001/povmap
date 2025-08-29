@@ -7,7 +7,7 @@ const DEFAULT_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image"
 export async function POST(req: NextRequest) {
   try {
     const json = await req.json();
-    const { prompt, arrow, map } = json as {
+    const { prompt, arrow, map, mapSnapshotDataUrl } = json as {
       prompt: string;
       arrow?: { latitude: number; longitude: number; bearingDeg: number; lengthMeters: number };
       map: {
@@ -16,6 +16,7 @@ export async function POST(req: NextRequest) {
         bounds: { north: number; south: number; east: number; west: number };
         style: string;
       };
+      mapSnapshotDataUrl?: string;
     };
 
     const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
@@ -33,7 +34,8 @@ export async function POST(req: NextRequest) {
     try {
       const model = client.getGenerativeModel({ model: DEFAULT_MODEL });
       const contextText = buildContextText(prompt, arrow, map);
-      const res = await model.generateContent(contextText);
+      const imagePart = mapSnapshotDataUrl ? dataUrlToPart(mapSnapshotDataUrl) : undefined;
+      const res = await model.generateContent(imagePart ? [contextText, imagePart] : contextText);
       const imgPart = res.response.candidates?.[0]?.content?.parts?.find(
         (p: { inlineData?: { mimeType?: string; data?: string } }) => p.inlineData?.mimeType?.startsWith("image/")
       );
@@ -47,7 +49,7 @@ export async function POST(req: NextRequest) {
 
     // Fallback: direct REST call to Images API (v1beta) if available in your environment.
     // This uses fetch to POST to images:generate.
-    const rest = await callImagesGenerateREST(apiKey, DEFAULT_MODEL, prompt, arrow, map);
+    const rest = await callImagesGenerateREST(apiKey, DEFAULT_MODEL, prompt, arrow, map, mapSnapshotDataUrl);
     if (rest) return Response.json(rest);
 
     throw new Error("Model did not return an image");
@@ -72,10 +74,10 @@ function buildContextText(
         map.bounds.west
       .toFixed(4)}. Zoom ${map.zoom}.`
     : "";
-  return `Generate a plausible, photo-realistic point-of-view image from the indicated map location and facing direction.
+  return `Generate an image of what the red arrow sees. Use the map snapshot as spatial context and viewpoint.
 ${loc}
 ${bounds}
-Prompt: ${prompt}
+User caption (optional): ${prompt || ""}
 Label AI-generated if watermarks are supported.`;
 }
 
@@ -84,19 +86,23 @@ async function callImagesGenerateREST(
   model: string,
   prompt: string,
   arrow?: { latitude: number; longitude: number; bearingDeg: number; lengthMeters: number },
-  map?: { zoom: number; center: { latitude: number; longitude: number }; bounds?: { north: number; south: number; east: number; west: number } }
+  map?: { zoom: number; center: { latitude: number; longitude: number }; bounds?: { north: number; south: number; east: number; west: number } },
+  mapSnapshotDataUrl?: string
 ) {
   try {
+    const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [
+      { text: buildContextText(prompt, arrow, map) },
+    ];
+    if (mapSnapshotDataUrl) {
+      const inline = dataUrlToPart(mapSnapshotDataUrl);
+      parts.push(inline);
+    }
+
     const rq: {
-      contents: Array<{ role: string; parts: Array<{ text: string }> }>;
+      contents: Array<{ role: string; parts: typeof parts }>;
     } = {
       // Basic text prompt. If SDK supports region conditioning in the future, add structured fields.
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: buildContextText(prompt, arrow, map) }],
-        },
-      ],
+      contents: [{ role: "user", parts }],
     };
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
@@ -136,5 +142,14 @@ async function synthMockImage(text: string) {
 
 function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function dataUrlToPart(dataUrl: string): { inlineData: { mimeType: string; data: string } } {
+  const match = /^data:([^;]+);base64,(.*)$/.exec(dataUrl);
+  if (!match) {
+    return { inlineData: { mimeType: "image/jpeg", data: "" } };
+  }
+  const [, mimeType, data] = match;
+  return { inlineData: { mimeType, data } };
 }
 
