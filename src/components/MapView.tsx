@@ -3,13 +3,14 @@ import { useCallback, useRef, useState } from "react";
 import Map, { MapRef, NavigationControl } from "react-map-gl/maplibre";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import Image from "next/image";
 import { ArrowSelection, MapStateSnapshot, PovResult } from "@/types";
 import { useHistory } from "@/hooks/useHistory";
 
-const DEFAULT_CENTER = { latitude: 37.7749, longitude: -122.4194 };
+const DEFAULT_CENTER = { latitude: 18.5204, longitude: 73.8567 };
 
 type GeneratePayload = {
-  prompt: string;
+  prompt?: string;
   arrow?: ArrowSelection;
   map: MapStateSnapshot;
 };
@@ -21,30 +22,20 @@ export default function MapView() {
   const [prompt, setPrompt] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [arrow, setArrow] = useState<ArrowSelection | undefined>(undefined);
-  const { items, add, remove, clear } = useHistory();
+  const [bearingDeg, setBearingDeg] = useState<number>(0);
+  const [lengthMeters, setLengthMeters] = useState<number>(150);
+  const { items, add, remove } = useHistory();
 
-  const styleUrl = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
+  const styleUrl = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json";
 
   const onMapClick = useCallback((e: { lngLat: { lng: number; lat: number } }) => {
-    const map = mapRef.current?.getMap();
-    if (!map) return;
-    const clickLngLat = e.lngLat; // {lng, lat}
-
-    // Compute bearing from center to click for quick UX.
-    const center = map.getCenter();
-    const bearing = Math.atan2(
-      (clickLngLat.lng - center.lng) * Math.cos((center.lat * Math.PI) / 180),
-      clickLngLat.lat - center.lat
-    );
-    const bearingDeg = ((bearing * 180) / Math.PI + 360) % 360;
-
     setArrow({
-      latitude: clickLngLat.lat,
-      longitude: clickLngLat.lng,
-      bearingDeg,
-      lengthMeters: 150,
+      latitude: e.lngLat.lat,
+      longitude: e.lngLat.lng,
+      bearingDeg: bearingDeg,
+      lengthMeters: lengthMeters,
     });
-  }, []);
+  }, [bearingDeg, lengthMeters]);
 
   const snapshotMapState = useCallback((): MapStateSnapshot | undefined => {
     const map = mapRef.current?.getMap();
@@ -64,27 +55,27 @@ export default function MapView() {
   }, [styleUrl]);
 
   const drawOverlay = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number) => {
-    if (!arrow) return;
+    const map = mapRef.current?.getMap();
+    if (!map || !arrow) return;
+
+    const origin = map.project([arrow.longitude, arrow.latitude]);
     const angle = (arrow.bearingDeg * Math.PI) / 180;
-    const centerX = width / 2;
-    const centerY = height / 2;
     const lengthPx = Math.min(width, height) * 0.25;
 
-    const endX = centerX + Math.sin(angle) * lengthPx;
-    const endY = centerY - Math.cos(angle) * lengthPx;
+    const endX = origin.x + Math.sin(angle) * lengthPx;
+    const endY = origin.y - Math.cos(angle) * lengthPx;
 
     ctx.save();
     ctx.lineWidth = 4;
-    ctx.strokeStyle = "#ef4444";
-    ctx.fillStyle = "#ef4444";
+    ctx.strokeStyle = "#16a34a";
+    ctx.fillStyle = "#16a34a";
     ctx.lineCap = "round";
 
     ctx.beginPath();
-    ctx.moveTo(centerX, centerY);
+    ctx.moveTo(origin.x, origin.y);
     ctx.lineTo(endX, endY);
     ctx.stroke();
 
-    // Arrow head
     const headLen = 12;
     const headAngle = Math.PI / 8;
     const leftX = endX - headLen * Math.sin(angle - headAngle);
@@ -98,7 +89,6 @@ export default function MapView() {
     ctx.lineTo(rightX, rightY);
     ctx.closePath();
     ctx.fill();
-
     ctx.restore();
   }, [arrow]);
 
@@ -106,26 +96,23 @@ export default function MapView() {
     const map = mapRef.current?.getMap();
     if (!map) return undefined;
     const canvas = map.getCanvas();
-
     const offscreen = document.createElement("canvas");
     offscreen.width = canvas.width;
     offscreen.height = canvas.height;
     const ctx = offscreen.getContext("2d");
     if (!ctx) return undefined;
-
     ctx.drawImage(canvas, 0, 0);
     drawOverlay(ctx, offscreen.width, offscreen.height);
     return offscreen.toDataURL("image/jpeg", 0.8);
   }, [drawOverlay]);
 
   const generate = useCallback(async () => {
-    if (!prompt.trim()) return;
+    if (!arrow) return;
     setIsGenerating(true);
     try {
       const mapState = snapshotMapState();
       if (!mapState) return;
-
-      const payload: GeneratePayload = { prompt: prompt.trim(), arrow, map: mapState };
+      const payload: GeneratePayload = { prompt: prompt.trim() || undefined, arrow, map: mapState };
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -133,12 +120,11 @@ export default function MapView() {
       });
       if (!res.ok) throw new Error("Generation failed");
       const data = await res.json();
-
       const mapSnapshotDataUrl = (await exportMapSnapshot()) ?? "";
       const result: PovResult = {
         id: data.id ?? crypto.randomUUID(),
         createdAt: Date.now(),
-        request: { prompt: payload.prompt, arrow: payload.arrow!, map: payload.map },
+        request: { prompt: payload.prompt || "", arrow: payload.arrow!, map: payload.map },
         mapSnapshotDataUrl,
         imageDataUrl: data.imageDataUrl,
         model: data.model,
@@ -169,17 +155,13 @@ export default function MapView() {
   }, [drawOverlay]);
 
   return (
-    <div className="grid grid-rows-[auto_1fr_auto] min-h-screen">
-      <header className="px-4 py-3 border-b bg-white/80 backdrop-blur flex items-center gap-3">
-        <h1 className="font-semibold">POV Map</h1>
-        <span className="text-xs text-gray-500">Click map to set view and direction</span>
-      </header>
+    <div className="min-h-screen grid grid-cols-1 lg:grid-cols-[1fr_360px]">
       <div className="relative">
         <Map
           ref={mapRef}
           mapLib={maplibregl}
           initialViewState={{ latitude: DEFAULT_CENTER.latitude, longitude: DEFAULT_CENTER.longitude, zoom: 12 }}
-          style={{ width: "100%", height: "calc(100vh - 200px)" }}
+          style={{ width: "100%", height: "100vh" }}
           mapStyle={styleUrl}
           onClick={onMapClick}
           onRender={onRender}
@@ -187,61 +169,66 @@ export default function MapView() {
           <NavigationControl position="top-left" />
         </Map>
         <canvas ref={canvasRef} className="pointer-events-none absolute inset-0" />
+        <div className="absolute top-3 left-3 px-3 py-1.5 rounded-full text-xs bg-white/80 backdrop-blur border text-gray-700">Click map to set viewpoint</div>
       </div>
-      <section className="border-t bg-white/80 backdrop-blur">
-        <div className="max-w-6xl mx-auto p-4 grid gap-3">
-          <div className="flex gap-2">
-            <input
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Describe the POV scene..."
-              className="flex-1 rounded border px-3 py-2 text-sm"
-            />
-            <button onClick={clearArrow} className="rounded border px-3 py-2 text-sm">Clear arrow</button>
-            <button disabled={!arrow || isGenerating || !prompt.trim()} onClick={generate} className="rounded bg-black text-white px-3 py-2 text-sm disabled:opacity-50">
-              {isGenerating ? "Generating…" : "Generate View"}
-            </button>
-          </div>
 
+      <aside className="border-l bg-white/90 backdrop-blur p-4 flex flex-col gap-4">
+        <h2 className="text-base font-semibold">What does the arrow see?</h2>
+
+        <div className="grid gap-2">
+          <label className="text-xs text-gray-600">Direction: {Math.round(bearingDeg)}°</label>
+          <input type="range" min={0} max={359} value={bearingDeg} onChange={(e) => {
+            const v = Number(e.target.value);
+            setBearingDeg(v);
+            if (arrow) setArrow({ ...arrow, bearingDeg: v });
+          }} />
+        </div>
+
+        <div className="grid gap-2">
+          <label className="text-xs text-gray-600">Arrow length: {Math.round(lengthMeters)} m</label>
+          <input type="range" min={50} max={400} value={lengthMeters} onChange={(e) => {
+            const v = Number(e.target.value);
+            setLengthMeters(v);
+            if (arrow) setArrow({ ...arrow, lengthMeters: v });
+          }} />
+        </div>
+
+        <div className="grid gap-2">
+          <label className="text-xs text-gray-600">Optional caption</label>
+          <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="e.g., busy bazaar street at dusk"
+            className="rounded border px-3 py-2 text-sm min-h-20" />
+        </div>
+
+        <div className="flex gap-2">
+          <button onClick={clearArrow} className="rounded border px-3 py-2 text-sm">Clear arrow</button>
+          <button disabled={!arrow || isGenerating} onClick={generate} className="rounded bg-green-600 text-white px-3 py-2 text-sm disabled:opacity-50">
+            {isGenerating ? "Generating…" : "Generate View"}
+          </button>
+        </div>
+
+        <div className="border-t pt-3 grid gap-2">
+          <h3 className="text-sm font-medium">History</h3>
+          {items.length === 0 && <p className="text-xs text-gray-500">No results yet.</p>}
           <div className="grid gap-3">
-            {items.length > 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {items.map((item) => (
-                  <article key={item.id} className="border rounded overflow-hidden bg-white">
-                    <div className="grid grid-cols-2 gap-0">
-                      <img src={item.mapSnapshotDataUrl} alt="Map" className="w-full h-40 object-cover" />
-                      <img src={item.imageDataUrl} alt="AI" className="w-full h-40 object-cover" />
-                    </div>
-                    <div className="p-3 border-t">
-                      <p className="text-sm line-clamp-2">{item.request.prompt}</p>
-                      <div className="mt-2 flex gap-2 text-xs">
-                        <button
-                          onClick={() => {
-                            setPrompt(item.request.prompt);
-                            setArrow(item.request.arrow);
-                          }}
-                          className="px-2 py-1 border rounded"
-                        >
-                          Tweak
-                        </button>
-                        <button
-                          onClick={() => navigator.clipboard.writeText(JSON.stringify(item, null, 2))}
-                          className="px-2 py-1 border rounded"
-                        >
-                          Copy JSON
-                        </button>
-                        <button onClick={() => remove(item.id)} className="px-2 py-1 border rounded text-red-600">Delete</button>
-                      </div>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-gray-500">No results yet.</p>
-            )}
+            {items.map((item) => (
+              <article key={item.id} className="border rounded overflow-hidden bg-white">
+                <div className="grid grid-cols-2 gap-0">
+                  <Image src={item.mapSnapshotDataUrl} alt="Map" width={320} height={160} className="w-full h-32 object-cover" />
+                  <Image src={item.imageDataUrl} alt="AI" width={320} height={160} className="w-full h-32 object-cover" />
+                </div>
+                <div className="p-3 border-t">
+                  <p className="text-xs line-clamp-2">{item.request.prompt}</p>
+                  <div className="mt-2 flex gap-2 text-xs">
+                    <button onClick={() => { setPrompt(item.request.prompt); setArrow(item.request.arrow); }} className="px-2 py-1 border rounded">Tweak</button>
+                    <button onClick={() => navigator.clipboard.writeText(JSON.stringify(item, null, 2))} className="px-2 py-1 border rounded">Copy JSON</button>
+                    <button onClick={() => remove(item.id)} className="px-2 py-1 border rounded text-red-600">Delete</button>
+                  </div>
+                </div>
+              </article>
+            ))}
           </div>
         </div>
-      </section>
+      </aside>
     </div>
   );
 }
